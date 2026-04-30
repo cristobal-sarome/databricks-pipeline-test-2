@@ -435,13 +435,11 @@ class _BlockTracker(StatefulProcessor):
         if timerValues.getCurrentProcessingTimeInMs() - last_activity >= _TTL_MS:
             self._last_block.clear()
             self._last_activity_ms.clear()
-        # Python determines whether a function is a generator at compile time by
-        # the presence of any `yield` statement in its body — not at runtime.
-        # transformWithState expects a generator function (inspect.isgeneratorfunction
-        # must return True). Without the yield below, `return` makes this a regular
-        # function and Spark's handler breaks. The yield is unreachable by design.
-        return
-        yield  # noqa: unreachable
+        # yield from [] makes this an explicit empty generator — no output rows
+        # on timer expiry. Preferred over `return; yield` because `return` in a
+        # generator raises StopIteration immediately, which can confuse Spark's
+        # iterator handling for handleExpiredTimer.
+        yield from []
 
     def close(self) -> None:
         pass
