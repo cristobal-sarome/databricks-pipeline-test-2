@@ -380,30 +380,26 @@ class _BlockTracker(StatefulProcessor):
     block context at their exact timestamp — not just the latest known block.
 
     State per case_id:
-      - last_block:       last navigation block seen (STRING)
-      - last_activity_ms: processing time of the most recent batch (LONG)
+      - last_block: last navigation block seen, with native 24h TTL.
 
-    Expiry strategy: on every batch of activity, a new 24h processing-time timer
-    is registered. On expiry, if the case has been idle for the full 24h the state
-    is cleared; if a newer batch arrived in the meantime the timer is stale and
-    ignored. This avoids timer deletion (which requires storing the old timestamp)
-    at the cost of a small number of no-op expiry calls per case.
+    Expiry: Spark resets the TTL clock on every update() call, so the state
+    expires automatically after 24h of inactivity — no manual timers needed.
     """
 
     def init(self, handle: StatefulProcessorHandle) -> None:
-        self._handle = handle
-        # getValueState requires a StructType — scalar types are not accepted directly
-        self._last_block       = handle.getValueState(
-            "last_block",       StructType([StructField("v", StringType())])
-        )
-        self._last_activity_ms = handle.getValueState(
-            "last_activity_ms", StructType([StructField("v", LongType())])
+        # Native TTL: Spark expires this state after 24h of inactivity.
+        # ttlDurationMs resets on every update(), so active sessions never expire.
+        # Eliminates the need for handleExpiredTimer, registerTimer, and
+        # timeMode="processingTime" — all of which were causing stalling.
+        self._last_block = handle.getValueState(
+            "last_block",
+            StructType([StructField("v", StringType())]),
+            ttlDurationMs=_TTL_MS,
         )
 
     def handleInputRows(self, key, rows, timerValues):
         state = self._last_block.get()
         last_block = (state.v if state.v is not None else "Desconocido") if state is not None else "Desconocido"
-        now_ms = timerValues.getCurrentProcessingTimeInMs()
 
         row_list = sorted(
             list(rows),
@@ -419,27 +415,9 @@ class _BlockTracker(StatefulProcessor):
                 running_block = row.nav_bloque
             yield Row(**{**row.asDict(), "active_block": running_block})
 
-        # All state writes after all yields so they don't interleave with
-        # the output stream and risk blocking the JVM reader thread.
+        # State write after all yields to avoid interleaving RPC with output stream.
         if running_block != last_block:
             self._last_block.update(Row(v=running_block))
-        self._last_activity_ms.update(Row(v=now_ms))
-        self._handle.registerTimer(now_ms + _TTL_MS)
-
-    def handleExpiredTimer(self, key, timerValues, expiredTimerInfo):
-        state = self._last_activity_ms.get()
-        last_activity = (state.v if state.v is not None else 0) if state is not None else 0
-        # Only clear if the case has truly been idle for the full TTL.
-        # If a newer batch arrived after this timer was registered the gap
-        # will be < _TTL_MS and the timer is stale — a later one will fire.
-        if timerValues.getCurrentProcessingTimeInMs() - last_activity >= _TTL_MS:
-            self._last_block.clear()
-            self._last_activity_ms.clear()
-        # yield from [] makes this an explicit empty generator — no output rows
-        # on timer expiry. Preferred over `return; yield` because `return` in a
-        # generator raises StopIteration immediately, which can confuse Spark's
-        # iterator handling for handleExpiredTimer.
-        yield from []
 
     def close(self) -> None:
         pass
@@ -449,7 +427,7 @@ class _BlockTracker(StatefulProcessor):
     name="silver.events_enriched",
     comment="parsed_events enriched with active_block via transformWithState. "
             "Block context is exact at each event's timestamp within the session. "
-            "State expires after 24h of inactivity per case_id.",
+            "State expires after 24h of inactivity via native TTL.",
     partition_cols=["dia_real", "event_type"],
 )
 def events_enriched():
@@ -463,7 +441,7 @@ def events_enriched():
         .transformWithState(
             _BlockTracker(),
             outputMode="append",
-            timeMode="processingTime",
+            timeMode="none",
             outputStructType=output_schema,
         )
     )
