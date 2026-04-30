@@ -401,29 +401,39 @@ class _BlockTracker(StatefulProcessor):
         )
 
     def handleInputRows(self, _key, rows, timerValues):
+        # ── Phase 1: read state (no yields) ──────────────────────────────────
+        # All RPC calls must happen before any yield. On the JVM side the same
+        # thread that reads our output stream also handles state RPC responses.
+        # Interleaving RPC calls with yields causes a deadlock: Python waits for
+        # the RPC response while the JVM thread waits for the next yielded row.
         _state = self._last_block.get()
         last_block = _state.v if _state is not None else "Desconocido"
         now_ms = timerValues.getCurrentProcessingTimeInMs()
 
-        # Materialize the iterator fully before yielding so we can sort.
-        # This separates the input-read phase from the output-write phase,
-        # avoiding a potential deadlock with the Arrow IPC pipe where Spark
-        # waits for output before sending more input.
+        # ── Phase 2: compute (no RPC, no yields) ─────────────────────────────
         row_list = sorted(
             list(rows),
             key=lambda r: r.ts_utc if r.ts_utc is not None
                           else datetime.min.replace(tzinfo=timezone.utc),
         )
-
+        # Scan once to find the final block state and build output rows
+        final_block = last_block
+        running_block = last_block
+        output_rows = []
         for row in row_list:
             if row.event_type == "navigation" and row.nav_bloque:
-                last_block = row.nav_bloque
-                self._last_block.update(Row(v=last_block))
-            yield Row(**{**row.asDict(), "active_block": last_block})
+                running_block = row.nav_bloque
+                final_block = running_block
+            output_rows.append(Row(**{**row.asDict(), "active_block": running_block}))
 
-        # Reset the 24h expiry window on each batch of activity
+        # ── Phase 3: write state (no yields) ─────────────────────────────────
+        if final_block != last_block:
+            self._last_block.update(Row(v=final_block))
         self._last_activity_ms.update(Row(v=now_ms))
         self._handle.registerTimer(now_ms + _TTL_MS)
+
+        # ── Phase 4: yield output (no RPC) ───────────────────────────────────
+        yield from output_rows
 
     def handleExpiredTimer(self, _key, timerValues, _expiredTimerInfo):
         _state = self._last_activity_ms.get()
