@@ -400,7 +400,7 @@ class _BlockTracker(StatefulProcessor):
             "last_activity_ms", StructType([StructField("v", LongType())])
         )
 
-    def handleInputRows(self, _key, rows, timerValues, _expiredTimerInfo):
+    def handleInputRows(self, _key, rows, timerValues):
         _state = self._last_block.get()
         last_block = _state.v if _state is not None else "Desconocido"
         now_ms = timerValues.getCurrentProcessingTimeInMs()
