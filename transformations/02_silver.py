@@ -389,8 +389,7 @@ class _BlockTracker(StatefulProcessor):
     def init(self, handle: StatefulProcessorHandle) -> None:
         # Native TTL: Spark expires this state after 24h of inactivity.
         # ttlDurationMs resets on every update(), so active sessions never expire.
-        # Eliminates the need for handleExpiredTimer, registerTimer, and
-        # timeMode="processingTime" — all of which were causing stalling.
+        # Eliminates the need for handleExpiredTimer, registerTimer, and manual cleanup.
         self._last_block = handle.getValueState(
             "last_block",
             StructType([StructField("v", StringType())]),
@@ -437,11 +436,12 @@ def events_enriched():
     )
     return (
         parsed
+        .withWatermark("ts_utc", "2 hours") #TODO: check if I need this
         .groupBy("case_id")
         .transformWithState(
             _BlockTracker(),
             outputMode="append",
-            timeMode="none",
+            timeMode="eventTime",
             outputStructType=output_schema,
         )
     )
