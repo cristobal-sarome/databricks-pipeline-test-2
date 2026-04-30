@@ -361,3 +361,64 @@ def parsed_events():
         "source_file",
         "ingestion_timestamp",
     )
+
+
+# ── Block enrichment ──────────────────────────────────────────────────────────
+
+from datetime import datetime, timezone
+from pyspark.sql.streaming.stateful_processor import StatefulProcessor, StatefulProcessorHandle
+
+
+class _BlockTracker(StatefulProcessor):
+    """Propagates the active navigation block to every event in a case session.
+
+    Groups the stream by case_id, sorts each micro-batch by ts_utc, and carries
+    the last seen nav_bloque forward so integration events inherit the correct
+    block context at their exact timestamp — not just the latest known block.
+
+    State: one StringType value (last_block) per case_id.
+
+    TODO for production: switch timeMode to "processingTime" and register a 24-hour
+    timer in handleInputRows to expire idle sessions and bound state store growth.
+    """
+
+    def init(self, handle: StatefulProcessorHandle) -> None:
+        self._last_block = handle.getValueState("last_block", StringType())
+
+    def handleInputRows(self, _key, rows, _timerValues, _expiredTimerInfo):
+        last_block = self._last_block.get() or "Desconocido"
+        for row in sorted(
+            rows,
+            key=lambda r: r.ts_utc if r.ts_utc is not None
+                          else datetime.min.replace(tzinfo=timezone.utc),
+        ):
+            if row.event_type == "navigation" and row.nav_bloque:
+                last_block = row.nav_bloque
+                self._last_block.update(last_block)
+            yield {**row.asDict(), "active_block": last_block}
+
+    def close(self) -> None:
+        pass
+
+
+@dp.table(
+    name="silver.events_enriched",
+    comment="parsed_events enriched with active_block via transformWithState. "
+            "Block context is exact at each event's timestamp within the session.",
+    partition_cols=["dia_real", "event_type"],
+)
+def events_enriched():
+    parsed = dp.read_stream("silver.parsed_events")
+    output_schema = StructType(
+        parsed.schema.fields + [StructField("active_block", StringType(), True)]
+    )
+    return (
+        parsed
+        .groupBy("case_id")
+        .transformWithState(
+            _BlockTracker(),
+            outputMode="append",
+            timeMode="none",
+            outputStructType=output_schema,
+        )
+    )
