@@ -405,11 +405,17 @@ class _BlockTracker(StatefulProcessor):
         last_block = _state.v if _state is not None else "Desconocido"
         now_ms = timerValues.getCurrentProcessingTimeInMs()
 
-        for row in sorted(
-            rows,
+        # Materialize the iterator fully before yielding so we can sort.
+        # This separates the input-read phase from the output-write phase,
+        # avoiding a potential deadlock with the Arrow IPC pipe where Spark
+        # waits for output before sending more input.
+        row_list = sorted(
+            list(rows),
             key=lambda r: r.ts_utc if r.ts_utc is not None
                           else datetime.min.replace(tzinfo=timezone.utc),
-        ):
+        )
+
+        for row in row_list:
             if row.event_type == "navigation" and row.nav_bloque:
                 last_block = row.nav_bloque
                 self._last_block.update(Row(v=last_block))
@@ -428,7 +434,13 @@ class _BlockTracker(StatefulProcessor):
         if timerValues.getCurrentProcessingTimeInMs() - last_activity >= _TTL_MS:
             self._last_block.clear()
             self._last_activity_ms.clear()
-        return iter([])
+        # Python determines whether a function is a generator at compile time by
+        # the presence of any `yield` statement in its body — not at runtime.
+        # transformWithState expects a generator function (inspect.isgeneratorfunction
+        # must return True). Without the yield below, `return` makes this a regular
+        # function and Spark's handler breaks. The yield is unreachable by design.
+        return
+        yield  # noqa: unreachable
 
     def close(self) -> None:
         pass
