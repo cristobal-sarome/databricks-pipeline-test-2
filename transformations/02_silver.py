@@ -3,7 +3,7 @@
 # Partitioned by dia_real + event_type to serve gold.flog_maestro efficiently.
 
 from pyspark import pipelines as dp
-from pyspark.sql import functions as F
+from pyspark.sql import functions as F, Row
 from pyspark.sql.types import (
     StructType, StructField, StringType, LongType, BooleanType,
 )
@@ -392,11 +392,17 @@ class _BlockTracker(StatefulProcessor):
 
     def init(self, handle: StatefulProcessorHandle) -> None:
         self._handle = handle
-        self._last_block       = handle.getValueState("last_block",       "STRING")
-        self._last_activity_ms = handle.getValueState("last_activity_ms", "LONG")
+        # getValueState requires a StructType — scalar types are not accepted directly
+        self._last_block       = handle.getValueState(
+            "last_block",       StructType([StructField("v", StringType())])
+        )
+        self._last_activity_ms = handle.getValueState(
+            "last_activity_ms", StructType([StructField("v", LongType())])
+        )
 
     def handleInputRows(self, _key, rows, timerValues, _expiredTimerInfo):
-        last_block = self._last_block.get() or "Desconocido"
+        _state = self._last_block.get()
+        last_block = _state.v if _state is not None else "Desconocido"
         now_ms = timerValues.getCurrentProcessingTimeInMs()
 
         for row in sorted(
@@ -406,15 +412,16 @@ class _BlockTracker(StatefulProcessor):
         ):
             if row.event_type == "navigation" and row.nav_bloque:
                 last_block = row.nav_bloque
-                self._last_block.update(last_block)
+                self._last_block.update(Row(v=last_block))
             yield {**row.asDict(), "active_block": last_block}
 
         # Reset the 24h expiry window on each batch of activity
-        self._last_activity_ms.update(now_ms)
+        self._last_activity_ms.update(Row(v=now_ms))
         self._handle.registerTimer(now_ms + _TTL_MS)
 
     def handleExpiredTimer(self, _key, timerValues, _expiredTimerInfo):
-        last_activity = self._last_activity_ms.get() or 0
+        _state = self._last_activity_ms.get()
+        last_activity = _state.v if _state is not None else 0
         # Only clear if the case has truly been idle for the full TTL.
         # If a newer batch arrived after this timer was registered the gap
         # will be < _TTL_MS and the timer is stale — a later one will fire.
