@@ -413,7 +413,7 @@ class _BlockTracker(StatefulProcessor):
             if row.event_type == "navigation" and row.nav_bloque:
                 last_block = row.nav_bloque
                 self._last_block.update(Row(v=last_block))
-            yield {**row.asDict(), "active_block": last_block}
+            yield Row(**{**row.asDict(), "active_block": last_block})
 
         # Reset the 24h expiry window on each batch of activity
         self._last_activity_ms.update(Row(v=now_ms))
