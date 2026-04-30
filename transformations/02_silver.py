@@ -369,6 +369,9 @@ from datetime import datetime, timezone
 from pyspark.sql.streaming.stateful_processor import StatefulProcessor, StatefulProcessorHandle
 
 
+_TTL_MS = 24 * 60 * 60 * 1000  # 24 hours in milliseconds
+
+
 class _BlockTracker(StatefulProcessor):
     """Propagates the active navigation block to every event in a case session.
 
@@ -376,17 +379,26 @@ class _BlockTracker(StatefulProcessor):
     the last seen nav_bloque forward so integration events inherit the correct
     block context at their exact timestamp — not just the latest known block.
 
-    State: one StringType value (last_block) per case_id.
+    State per case_id:
+      - last_block:       last navigation block seen (STRING)
+      - last_activity_ms: processing time of the most recent batch (LONG)
 
-    TODO for production: switch timeMode to "processingTime" and register a 24-hour
-    timer in handleInputRows to expire idle sessions and bound state store growth.
+    Expiry strategy: on every batch of activity, a new 24h processing-time timer
+    is registered. On expiry, if the case has been idle for the full 24h the state
+    is cleared; if a newer batch arrived in the meantime the timer is stale and
+    ignored. This avoids timer deletion (which requires storing the old timestamp)
+    at the cost of a small number of no-op expiry calls per case.
     """
 
     def init(self, handle: StatefulProcessorHandle) -> None:
-        self._last_block = handle.getValueState("last_block", StringType())
+        self._handle = handle
+        self._last_block       = handle.getValueState("last_block",       "STRING")
+        self._last_activity_ms = handle.getValueState("last_activity_ms", "LONG")
 
-    def handleInputRows(self, _key, rows, _timerValues, _expiredTimerInfo):
+    def handleInputRows(self, _key, rows, timerValues, _expiredTimerInfo):
         last_block = self._last_block.get() or "Desconocido"
+        now_ms = timerValues.getCurrentProcessingTimeInMs()
+
         for row in sorted(
             rows,
             key=lambda r: r.ts_utc if r.ts_utc is not None
@@ -397,6 +409,20 @@ class _BlockTracker(StatefulProcessor):
                 self._last_block.update(last_block)
             yield {**row.asDict(), "active_block": last_block}
 
+        # Reset the 24h expiry window on each batch of activity
+        self._last_activity_ms.update(now_ms)
+        self._handle.registerTimer(now_ms + _TTL_MS)
+
+    def handleExpiredTimer(self, _key, timerValues, _expiredTimerInfo):
+        last_activity = self._last_activity_ms.get() or 0
+        # Only clear if the case has truly been idle for the full TTL.
+        # If a newer batch arrived after this timer was registered the gap
+        # will be < _TTL_MS and the timer is stale — a later one will fire.
+        if timerValues.getCurrentProcessingTimeInMs() - last_activity >= _TTL_MS:
+            self._last_block.clear()
+            self._last_activity_ms.clear()
+        return iter([])
+
     def close(self) -> None:
         pass
 
@@ -404,7 +430,8 @@ class _BlockTracker(StatefulProcessor):
 @dp.table(
     name="silver.events_enriched",
     comment="parsed_events enriched with active_block via transformWithState. "
-            "Block context is exact at each event's timestamp within the session.",
+            "Block context is exact at each event's timestamp within the session. "
+            "State expires after 24h of inactivity per case_id.",
     partition_cols=["dia_real", "event_type"],
 )
 def events_enriched():
@@ -418,7 +445,7 @@ def events_enriched():
         .transformWithState(
             _BlockTracker(),
             outputMode="append",
-            timeMode="none",
+            timeMode="processingTime",
             outputStructType=output_schema,
         )
     )
