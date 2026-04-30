@@ -400,9 +400,9 @@ class _BlockTracker(StatefulProcessor):
             "last_activity_ms", StructType([StructField("v", LongType())])
         )
 
-    def handleInputRows(self, _key, rows, timerValues):
-        _state = self._last_block.get()
-        last_block = _state.v if _state is not None else "Desconocido"
+    def handleInputRows(self, key, rows, timerValues):
+        state = self._last_block.get()
+        last_block = (state.v if state.v is not None else "Desconocido") if state is not None else "Desconocido"
         now_ms = timerValues.getCurrentProcessingTimeInMs()
 
         row_list = sorted(
@@ -426,9 +426,9 @@ class _BlockTracker(StatefulProcessor):
         self._last_activity_ms.update(Row(v=now_ms))
         self._handle.registerTimer(now_ms + _TTL_MS)
 
-    def handleExpiredTimer(self, _key, timerValues, _expiredTimerInfo):
-        _state = self._last_activity_ms.get()
-        last_activity = _state.v if _state is not None else 0
+    def handleExpiredTimer(self, key, timerValues, expiredTimerInfo):
+        state = self._last_activity_ms.get()
+        last_activity = (state.v if state.v is not None else 0) if state is not None else 0
         # Only clear if the case has truly been idle for the full TTL.
         # If a newer batch arrived after this timer was registered the gap
         # will be < _TTL_MS and the timer is stale — a later one will fire.
