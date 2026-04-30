@@ -393,20 +393,17 @@ class _BlockTracker(StatefulProcessor):
     def init(self, handle: StatefulProcessorHandle) -> None:
         self._handle = handle
         # getValueState requires a StructType — scalar types are not accepted directly
-        self._last_block = handle.getValueState(
-            "last_block", StructType([StructField("v", StringType())])
+        self._last_block       = handle.getValueState(
+            "last_block",       StructType([StructField("v", StringType())])
         )
-        # TTL_DISABLED: comment back in to re-enable 24h expiry
-        # self._last_activity_ms = handle.getValueState(
-        #     "last_activity_ms", StructType([StructField("v", LongType())])
-        # )
+        self._last_activity_ms = handle.getValueState(
+            "last_activity_ms", StructType([StructField("v", LongType())])
+        )
 
     def handleInputRows(self, key, rows, timerValues):
         state = self._last_block.get()
         last_block = (state.v if state.v is not None else "Desconocido") if state is not None else "Desconocido"
-
-        # TTL_DISABLED:
-        # now_ms = timerValues.getCurrentProcessingTimeInMs()
+        now_ms = timerValues.getCurrentProcessingTimeInMs()
 
         row_list = sorted(
             list(rows),
@@ -426,26 +423,23 @@ class _BlockTracker(StatefulProcessor):
         # the output stream and risk blocking the JVM reader thread.
         if running_block != last_block:
             self._last_block.update(Row(v=running_block))
+        self._last_activity_ms.update(Row(v=now_ms))
+        self._handle.registerTimer(now_ms + _TTL_MS)
 
-        # TTL_DISABLED: comment back in to re-enable 24h expiry
-        # self._last_activity_ms.update(Row(v=now_ms))
-        # self._handle.registerTimer(now_ms + _TTL_MS)
-
-    # TTL_DISABLED: comment back in to re-enable 24h expiry
-    # def handleExpiredTimer(self, key, timerValues, expiredTimerInfo):
-    #     state = self._last_activity_ms.get()
-    #     last_activity = (state.v if state.v is not None else 0) if state is not None else 0
-    #     # Only clear if the case has truly been idle for the full TTL.
-    #     # If a newer batch arrived after this timer was registered the gap
-    #     # will be < _TTL_MS and the timer is stale — a later one will fire.
-    #     if timerValues.getCurrentProcessingTimeInMs() - last_activity >= _TTL_MS:
-    #         self._last_block.clear()
-    #         self._last_activity_ms.clear()
-    #     # yield from [] makes this an explicit empty generator — no output rows
-    #     # on timer expiry. Preferred over `return; yield` because `return` in a
-    #     # generator raises StopIteration immediately, which can confuse Spark's
-    #     # iterator handling for handleExpiredTimer.
-    #     yield from []
+    def handleExpiredTimer(self, key, timerValues, expiredTimerInfo):
+        state = self._last_activity_ms.get()
+        last_activity = (state.v if state.v is not None else 0) if state is not None else 0
+        # Only clear if the case has truly been idle for the full TTL.
+        # If a newer batch arrived after this timer was registered the gap
+        # will be < _TTL_MS and the timer is stale — a later one will fire.
+        if timerValues.getCurrentProcessingTimeInMs() - last_activity >= _TTL_MS:
+            self._last_block.clear()
+            self._last_activity_ms.clear()
+        # yield from [] makes this an explicit empty generator — no output rows
+        # on timer expiry. Preferred over `return; yield` because `return` in a
+        # generator raises StopIteration immediately, which can confuse Spark's
+        # iterator handling for handleExpiredTimer.
+        yield from []
 
     def close(self) -> None:
         pass
@@ -469,7 +463,7 @@ def events_enriched():
         .transformWithState(
             _BlockTracker(),
             outputMode="append",
-            timeMode="none",  # TTL_DISABLED: change back to "processingTime" to re-enable 24h expiry
+            timeMode="processingTime",
             outputStructType=output_schema,
         )
     )
