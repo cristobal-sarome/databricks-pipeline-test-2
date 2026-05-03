@@ -103,6 +103,7 @@ def events_with_block():
                 F.trim(F.regexp_extract(F.col("msg_text"), r"Bloque actual:\s*(.+)$", 1)),
             )
         )
+        .withColumn("ingestion_timestamp", F.current_timestamp())
         .filter(F.col("case_id").isNotNull() & F.col("event_type").isNotNull())
     )
 
