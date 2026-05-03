@@ -34,23 +34,25 @@ class _BlockTracker(StatefulProcessor):
             ttlDurationMs=_TTL_MS,
         )
 
-    def handleInputRows(self, key, rows, timerValues):
+    def handleInputRows(self, _key, rows, _timerValues):
         state = self._last_block.get()
-        running_block = (state.v if state and state.v is not None else "Unknown")
+        running_block = state[0] if state and state[0] is not None else "Unknown"
 
         for row in sorted(
             rows,
             key=lambda r: r.ts_utc if r.ts_utc is not None
-                          else datetime.min.replace(tzinfo=timezone.utc),
+            else datetime.min.replace(tzinfo=timezone.utc),
         ):
             if row.event_type == "navigation" and row.nav_bloque:
                 running_block = row.nav_bloque
+
             yield Row(**{**row.asDict(), "active_block": running_block})
 
         state_now = self._last_block.get()
-        last_saved = state_now.v if state_now else None
+        last_saved = state_now[0] if state_now else None
+
         if running_block != last_saved:
-            self._last_block.update(Row(v=running_block))
+            self._last_block.update((running_block,))
 
     def close(self) -> None:
         pass
