@@ -441,7 +441,7 @@ def events_enriched():
         .transformWithState(
             _BlockTracker(),
             outputMode="append",
-            timeMode="eventTime",
+            timeMode="ProcessingTime",
             outputStructType=output_schema,
         )
     )

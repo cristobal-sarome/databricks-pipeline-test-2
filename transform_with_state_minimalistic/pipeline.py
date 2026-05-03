@@ -7,6 +7,8 @@ from pyspark import pipelines as dp
 from pyspark.sql import Row, functions as F
 from pyspark.sql.streaming.stateful_processor import StatefulProcessor, StatefulProcessorHandle
 from pyspark.sql.types import StringType, StructField, StructType
+spark.conf.set("spark.sql.streaming.noDataMicroBatches.enabled", "false")
+
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -113,7 +115,7 @@ def events_with_block():
         .transformWithState(
             _BlockTracker(),
             outputMode="append",
-            timeMode="none",
+            timeMode="ProcessingTime",
             outputStructType=output_schema,
         )
     )

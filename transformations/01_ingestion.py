@@ -5,6 +5,8 @@ from pyspark import pipelines as dp
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, StringType
 from datetime import datetime, timezone, timedelta
+spark.conf.set("spark.sql.streaming.noDataMicroBatches.enabled", "false")
+
 
 # ── Configuration ────────────────────────────────────────────────────────────
 INPUT_PATH = "abfss://logs@yoizenftplanding.dfs.core.windows.net/"
